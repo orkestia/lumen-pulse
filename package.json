@@ -1,0 +1,65 @@
+{
+  "name": "@ltinteg/lumen-pulse",
+  "version": "0.1.0",
+  "description": "Framework-agnostic Lumen Pulse client — injectable product-analytics SDK for any UI (anonymous + authenticated).",
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "LtInteg / Orkestia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ltinteg/ltinteg-lumen-pulse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ltinteg/ltinteg-lumen-pulse/issues"
+  },
+  "homepage": "https://github.com/ltinteg/ltinteg-lumen-pulse#readme",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./auto": {
+      "types": "./dist/auto.d.ts",
+      "import": "./dist/auto.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": [
+    "./dist/auto.js"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/auto.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "lumen",
+    "pulse",
+    "analytics",
+    "product-analytics",
+    "orkestia",
+    "ltinteg",
+    "sdk"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}

@@ -1,0 +1,81 @@
+LtInteg Lumen Pulse Source-Available License
+Version 1.0, 2026-08-07
+
+Copyright (c) 2026 LtInteg / Orkestia. All rights reserved.
+
+NOTICE: This is source-available software. The source code is provided for
+transparency, audit, and authorized use. It is NOT open source under the OSI
+definition. Redistribution is prohibited except as expressly allowed below.
+
+1. Definitions
+
+  "Software" means the source code, object code, documentation, and other
+  materials in this repository.
+  "Licensor" means LtInteg / Orkestia and its affiliates.
+  "You" means the individual or legal entity exercising rights under this
+  license.
+  "Internal Use" means use by You solely within Your organization to instrument
+  products You own or operate, including building and deploying applications
+  that embed the Software as a client library, without providing the Software
+  itself to third parties as a standalone product or service.
+
+2. Grant of rights
+
+  Subject to this license, Licensor grants You a non-exclusive,
+  non-transferable, non-sublicensable, worldwide, royalty-free license to:
+
+  (a) use, copy, and modify the Software for Internal Use;
+  (b) compile and embed the Software into Your applications for Internal Use;
+  (c) view and study the source for security review and Internal Use.
+
+3. Redistribution prohibited
+
+  You may NOT, without prior written permission from Licensor:
+
+  (a) publish, distribute, sublicense, sell, lease, or otherwise transfer the
+      Software (in source or binary form) to any third party;
+  (b) offer the Software as a hosted, managed, or multi-tenant service to third
+      parties;
+  (c) publish modified or unmodified copies on package registries, mirrors,
+      public forks intended for redistribution, or similar distribution channels;
+  (d) remove or alter copyright, license, or proprietary notices.
+
+  Cloning or forking this repository for Your Internal Use is allowed. Public
+  forks that redistribute the Software are not allowed.
+
+4. Contributions
+
+  Unless Licensor agrees otherwise in writing, any contribution You submit to
+  Licensor is licensed to Licensor under this same license, and You grant
+  Licensor a perpetual, irrevocable, worldwide license to use and relicense
+  that contribution as part of the Software.
+
+5. No trademark license
+
+  This license does not grant rights to use Licensor's names, logos, or
+  trademarks, except as required for reasonable attribution in Internal Use
+  notices.
+
+6. Termination
+
+  This license terminates automatically if You breach it. Upon termination You
+  must cease all use of the Software and destroy copies in Your possession,
+  except that applications already deployed for Internal Use may continue to
+  run until You reasonably replace them, provided You do not further distribute
+  the Software.
+
+7. Disclaimer
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+  THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER
+  IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. Governing law
+
+  This license is governed by the laws of Brazil, without regard to conflict of
+  law principles, unless Licensor designates otherwise in writing.
+
+For commercial redistribution, OEM, or SaaS-reseller rights, contact Licensor.
