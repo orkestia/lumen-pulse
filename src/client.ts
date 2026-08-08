@@ -24,11 +24,17 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
   if (!config.writeKey) throw new Error('lumen-pulse: writeKey is required')
   if (!config.project) throw new Error('lumen-pulse: project is required')
   if (!config.ingestUrl) throw new Error('lumen-pulse: ingestUrl is required')
+  if (!config.writeKey.startsWith('lump_')) {
+    // Soft warning only — do not throw (tests / staging may use mocks).
+    console.warn(
+      'lumen-pulse: writeKey should start with lump_ (Pulse product key). Do not use lumk_ collector keys.',
+    )
+  }
 
   const storage = resolveStorage(config.storage)
   const fetchImpl = config.fetch ?? fetch.bind(globalThis)
   const flushIntervalMs = config.flushIntervalMs ?? DEFAULT_FLUSH_MS
-  const maxBatchSize = config.maxBatchSize ?? DEFAULT_BATCH
+  const maxBatchSize = Math.min(config.maxBatchSize ?? DEFAULT_BATCH, 50)
 
   let consent: ConsentStatus = loadConsent(storage, config.consent)
   let anonymousId: string | null = consent === 'granted' ? loadOrCreate(storage, ANON_KEY) : null

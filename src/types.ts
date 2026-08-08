@@ -31,11 +31,11 @@ export interface PulseEvent {
 }
 
 export interface LumenPulseConfig {
-  /** Project write-key (Lumen-compatible ingest auth). */
+  /** Pulse product write-key (`lump_…`). Never use collector `lumk_` keys. */
   writeKey: string
   /** Product / project slug, e.g. `posto-regulado`, `faladelivery`. */
   project: string
-  /** Ingest base URL, e.g. `https://pulse.example.com` or same-origin `/api`. */
+  /** Ingest base URL, e.g. `https://api-lumen.example` or same-origin proxy. */
   ingestUrl: string
   /** Optional org UUID when known at init. */
   organizationUuid?: string
