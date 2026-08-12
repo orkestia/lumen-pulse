@@ -24,8 +24,10 @@ export async function sendBatch(
       method: 'POST',
       headers: {
         'content-type': 'application/json',
+        // Primary Pulse credential header (matches Lumen ops + product_auth).
+        'x-api-key': config.writeKey,
+        // Also send Bearer for proxies / older scaffolds.
         authorization: `Bearer ${config.writeKey}`,
-        'x-lumen-pulse-write-key': config.writeKey,
       },
       body: JSON.stringify({ events }),
       keepalive: true,

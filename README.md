@@ -29,7 +29,7 @@ Do not republish this package to a public registry.
 import { createLumenPulse } from '@ltinteg/lumen-pulse'
 
 const pulse = createLumenPulse({
-  writeKey: 'lumk_…',           // project write-key
+  writeKey: 'lump_…',           // Pulse product key (not lumk_ collector)
   project: 'posto-regulado',    // or faladelivery, …
   ingestUrl: 'https://pulse.example.com', // or same-origin API
 })
@@ -52,7 +52,7 @@ await pulse.flush() // optional; batches flush automatically
 <script
   type="module"
   src="https://your-cdn.example/lumen-pulse/auto.js"
-  data-write-key="lumk_…"
+  data-write-key="lump_…"
   data-project="posto-regulado"
   data-ingest-url="https://pulse.example.com"
   data-consent="granted"
@@ -82,14 +82,15 @@ Every event includes `signal_kind: "product"`, `anonymous_id` (when consented),
 optional `user_id`, `session_id`, `project`, `properties`, and `context`
 (path, referrer, utm, locale, consent, …). See `src/types.ts`.
 
-Ingest target (scaffold): `POST {ingestUrl}/api/product/ingest/batch` with
-`Authorization: Bearer <writeKey>`.
+Ingest target: `POST {ingestUrl}/api/product/ingest/batch` with
+`X-Api-Key: <lump_…>` (and `Authorization: Bearer <lump_…>`).
 
 ## Repo status
 
-Scaffold for the injectable **client SDK** only. Ingest API, ClickHouse sink,
-and operator UI live in follow-up work (see ltinteg-memory idea
-`docs/ideas/lumen-product-analytics.md`).
+Injectable **client SDK** on branch `feat/pulse-sdk-align`. Product ingest API
+currently lives temporarily in `ltinteg-api-lumen` (`/api/product/*`); a dedicated
+Pulse service may extract later. See ltinteg-memory
+`docs/features/lumen-pulse-federation-implementation-plan.md`.
 
 ## Development
 
