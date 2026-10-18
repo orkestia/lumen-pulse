@@ -58,7 +58,7 @@
   },
   "devDependencies": {
     "jsdom": "^26.1.0",
-    "tsup": "^8.5.0",
+    "tsup": "^9.0.0",
     "typescript": "^5.8.0",
     "vitest": "^5.0.0"
   }
