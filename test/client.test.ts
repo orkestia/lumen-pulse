@@ -23,7 +23,7 @@ describe('createLumenPulse', () => {
     const storage = memoryStorage()
     const pulse = createLumenPulse({
       writeKey: 'lump_test',
-      project: 'posto-regulado',
+      project: 'my-landing',
       ingestUrl: 'http://example.test',
       storage,
       consent: 'unknown',
@@ -41,7 +41,7 @@ describe('createLumenPulse', () => {
     const storage = memoryStorage()
     const pulse = createLumenPulse({
       writeKey: 'lump_test',
-      project: 'faladelivery',
+      project: 'my-app',
       ingestUrl: 'http://pulse.test',
       storage,
       consent: 'granted',

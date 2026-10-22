@@ -2,10 +2,12 @@
  * Script-tag / auto-boot entry for landings without a bundler.
  *
  *   <script type="module" src="…/auto.js"
- *     data-write-key="…"
- *     data-project="posto-regulado"
- *     data-ingest-url="https://pulse.example.com"
- *     data-consent="granted"></script>
+ *     data-write-key="lump_…"
+ *     data-project="my-landing"
+ *     data-ingest-url="https://lumen-api.orkestia.dev"
+ *     data-consent="granted"
+ *     data-autocapture="history"
+ *     data-include-query-params="utm_*,ref"></script>
  *
  * Exposes `window.LumenPulse` as the client instance (or factory via create).
  */
@@ -38,7 +40,16 @@ function readScriptConfig(): Partial<LumenPulseConfig> | null {
       if (consentAttr === 'granted' || consentAttr === 'denied' || consentAttr === 'unknown') {
         cfg.consent = consentAttr
       }
-      if (el.getAttribute('data-autocapture') === 'true') cfg.autocapturePageViews = true
+      const autocapture = el.getAttribute('data-autocapture')
+      if (autocapture === 'true') cfg.autocapture = { pageViews: true }
+      else if (autocapture === 'history') cfg.autocapture = { pageViews: 'history' }
+      const query = el.getAttribute('data-include-query-params')
+      if (query) {
+        cfg.includeQueryParams = query
+          .split(',')
+          .map((p) => p.trim())
+          .filter(Boolean)
+      }
       const org = el.getAttribute('data-organization-uuid')
       if (org) cfg.organizationUuid = org
       return cfg
