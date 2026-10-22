@@ -76,6 +76,14 @@ export interface LumenPulseConfig {
   includeQueryParams?: string[]
   /** App version stamped into context. */
   appVersion?: string
+  /**
+   * Minutes without activity (tracked events, errors, user input seen by
+   * replay, the tab becoming visible) after which a new session_id starts.
+   * Default 30.
+   */
+  sessionTimeoutMinutes?: number
+  /** Hours after which a session is rotated even while active. Default 24. */
+  sessionMaxHours?: number
   /** Initial consent. Default `unknown` (no cookie until granted). */
   consent?: ConsentStatus
   /**

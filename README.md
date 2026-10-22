@@ -106,6 +106,23 @@ Nothing is sent and nothing but the consent choice is stored until consent is
 The choice itself is stored under `lumen_pulse.consent` so it survives reloads.
 Pass `storage: null` to keep everything in memory.
 
+## Sessions
+
+A `session_id` ends after **30 minutes without activity** (`sessionTimeoutMinutes`)
+or **24 hours after it started** even while active (`sessionMaxHours`). The next
+activity then starts a new one. Activity is any tracked event, `identify()`, a
+captured error, user input seen by session replay (mouse, scroll, typing,
+touch), or the tab becoming visible again. DOM changes alone do not keep a
+session alive.
+
+The start and last-activity times follow the same consent rules as
+`session_id`: in memory before consent, stored under `lumen_pulse.session_start`
+and `lumen_pulse.session_last` once granted, removed on `denied`. Tabs of the
+same browser share the stored session: a tab that comes back after another tab
+already started a new session joins it. A new session also starts error dedup
+and the replay sampling decision over. Sessions stored by v0.3 (no times) are
+replaced on the first load of v0.4.
+
 ## Privacy defaults
 
 - `context.path` is `location.pathname` with **no query string**. Allow specific
@@ -132,6 +149,8 @@ Pass `storage: null` to keep everything in memory.
 | `appVersion` | none | Stamped into `context.app_version` |
 | `captureErrors` | `false` | `true` or `{ ignore, sampleRate, maxPerMinute, release, environment }`: send uncaught errors (see [Browser errors](#browser-errors)) |
 | `replay` | `false` | `true` or `{ sampleRate, onErrorSampleRate, bufferSeconds, maskAllText, maskAllInputs, blockSelector, maxChunkBytes }`: masked session replay (see [Session replay](#session-replay)) |
+| `sessionTimeoutMinutes` | `30` | Idle minutes before a new `session_id` (see [Sessions](#sessions)) |
+| `sessionMaxHours` | `24` | Hours before a new `session_id` even while active |
 | `storage` | localStorage | Where ids persist after consent; `null` = memory |
 | `fetch` | global `fetch` | Override for tests or non-browser runtimes |
 | `onError` | none | Called when a batch is dropped (never throws into your app) |
@@ -285,7 +304,9 @@ session and makes a new sampling decision for the new one.
 
 **Sampling.** The decision is made once per `session_id` and stored next to it
 (`lumen_pulse.replay`, only after consent), so a session is recorded the same
-way across page loads.
+way across page loads. When the session rotates (see [Sessions](#sessions)) the
+recording stops, what is pending is uploaded under the old session, and a new
+recording starts for the new one: new decision, new full snapshot, `seq` from 0.
 
 - **Sampled sessions** stream: a chunk goes out every 10 s, when it reaches
   `maxChunkBytes`, and when the page is hidden or closed.
@@ -299,12 +320,16 @@ way across page loads.
 
 **Upload.** Chunks are gzip-compressed with the browser's `CompressionStream`,
 base64-encoded and sent to `POST {ingestUrl}/api/product/replay/chunk` with
-the same `lump_` key, in order (`seq` per session). Browsers without
+the same `lump_` key, in order (`seq` per session). The next `seq` is read from
+and written back to storage right before each upload, so tabs sharing a session
+take turns. Two tabs uploading in the same instant can still pick the same
+`seq` (storage has no atomic increment), and one of the two chunks can then be
+lost in playback. Browsers without
 `CompressionStream` (older than Chrome 80, Firefox 113, Safari 16.4) skip replay
 entirely; analytics and errors still work. Delivery follows the same retry
 rule as events. On `403` (for example `REPLAY_NOT_ENABLED`), `401`,
 `REPLAY_QUOTA_EXCEEDED` or `REPLAY_UNMASKED_FORBIDDEN`, recording stops for the
-rest of the page's life and `onError` gets the `LumenPulseError`. The last
+rest of the session and `onError` gets the `LumenPulseError`. The last
 chunk on page close is best effort: compression is asynchronous, so up to 10 s
 can be lost when a tab is killed.
 

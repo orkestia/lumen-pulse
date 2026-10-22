@@ -43,6 +43,13 @@ export type RecordFn = (options: RecordOptions) => (() => void) | undefined
 
 /** rrweb `EventType.Meta`: carries the page URL. */
 const META_EVENT = 4
+/** rrweb `EventType.IncrementalSnapshot`. */
+const INCREMENTAL_EVENT = 3
+/**
+ * Incremental sources that mean a person is there (mouse, scroll, input,
+ * touch, media, drag, selection). DOM mutations alone do not keep a session alive.
+ */
+const USER_INPUT_SOURCES = new Set([1, 2, 3, 5, 6, 7, 12, 14])
 
 export interface ResolvedReplayOptions {
   sampleRate: number
@@ -215,6 +222,8 @@ export interface ReplayHost {
   transport: TransportConfig
   includeQueryParams?: readonly string[] | undefined
   identity(): ReplayIdentity
+  /** Called on user input seen by the recorder (session idle tracking). */
+  activity?(): void
 }
 
 export interface ReplayRecorder {
@@ -259,8 +268,11 @@ export function createReplayRecorder(
   let trigger: ReplayTrigger = 'sampled'
   let hasError = false
   let errorRolled = false
-  /** Page-lifetime kill switch: no CompressionStream, rrweb failed, or the server said stop. */
-  let disabled = !compressionSupported()
+  /** Page-lifetime kill switch: no CompressionStream, or rrweb failed to load or start. */
+  let unsupported = !compressionSupported()
+  /** The server said stop (quota, not enabled, auth); cleared when a new session starts. */
+  let stopped = false
+  const off = () => unsupported || stopped
   let closed = false
   /** Bumped whenever a recorder must not start (stop / endSession / restart). */
   let generation = 0
@@ -288,7 +300,11 @@ export function createReplayRecorder(
   }
 
   const onEvent = (event: RrwebEvent, isCheckout?: boolean) => {
-    if (closed || disabled || mode === 'idle' || mode === 'off') return
+    if (closed || off() || mode === 'idle' || mode === 'off') return
+    if (event.type === INCREMENTAL_EVENT && host.activity) {
+      const source = (event.data as { source?: unknown } | undefined)?.source
+      if (typeof source === 'number' && USER_INPUT_SOURCES.has(source)) host.activity()
+    }
     if (event.type === META_EVENT && event.data && typeof event.data === 'object') {
       const data = event.data as { href?: unknown }
       if (typeof data.href === 'string') data.href = sanitizeHref(data.href, host.includeQueryParams)
@@ -319,17 +335,17 @@ export function createReplayRecorder(
   }
 
   const startRecorder = () => {
-    if (disabled || closed || stopRecorder) return
+    if (off() || closed || stopRecorder) return
     const gen = generation
     const begin = (record: RecordFn) => {
-      if (gen !== generation || disabled || closed || stopRecorder) return
+      if (gen !== generation || off() || closed || stopRecorder) return
       if (mode !== 'buffer' && mode !== 'stream') return
       // Two checkouts per window keep a full snapshot within bufferMs of now.
       const checkout = mode === 'buffer' ? Math.max(1000, Math.floor(options.bufferMs / 2)) : undefined
       try {
         stopRecorder = record(recordOptions(options, onEvent, checkout)) ?? null
       } catch (err) {
-        disable()
+        disable(true)
         report(err)
       }
       if (mode === 'stream') ensureTimer()
@@ -346,7 +362,7 @@ export function createReplayRecorder(
       },
       (err: unknown) => {
         loading = null
-        disable()
+        disable(true)
         report(err)
       },
     )
@@ -375,8 +391,9 @@ export function createReplayRecorder(
     t.unref?.()
   }
 
-  const disable = () => {
-    disabled = true
+  const disable = (permanent: boolean) => {
+    if (permanent) unsupported = true
+    else stopped = true
     haltRecorder()
     mode = 'off'
     segments = []
@@ -438,10 +455,10 @@ export function createReplayRecorder(
   }
 
   const upload = async (chunk: PendingChunk): Promise<void> => {
-    if (disabled || chunk.epoch !== epoch || chunk.items.length === 0) return
+    if (off() || chunk.epoch !== epoch || chunk.items.length === 0) return
     const parts = await compress(chunk.items)
     for (const part of parts) {
-      if (disabled || chunk.epoch !== epoch) return
+      if (off() || chunk.epoch !== epoch) return
       if (part.gz.length > MAX_SERVER_CHUNK_BYTES) {
         report(
           new LumenPulseError(
@@ -476,7 +493,7 @@ export function createReplayRecorder(
       ).then((error) => {
         if (!error) return
         if ((error.code && STOP_CODES.has(error.code)) || error.status === 401 || error.status === 403) {
-          disable()
+          disable(false)
         }
         report(error)
       })
@@ -503,7 +520,7 @@ export function createReplayRecorder(
 
   const reset = () => {
     haltRecorder()
-    mode = disabled ? 'off' : 'idle'
+    mode = off() ? 'off' : 'idle'
     segments = []
     pending = []
     pendingBytes = 0
@@ -518,7 +535,7 @@ export function createReplayRecorder(
     },
 
     start() {
-      if (disabled || closed || typeof window === 'undefined') return
+      if (off() || closed || typeof window === 'undefined') return
       if (mode !== 'idle') return
       const { sessionId } = host.identity()
       let state = readState(storage)
@@ -551,11 +568,12 @@ export function createReplayRecorder(
 
     endSession() {
       if (mode === 'stream') flushPending()
+      stopped = false
       reset()
     },
 
     errorCaptured() {
-      if (closed || disabled) return
+      if (closed || off()) return
       if (mode === 'stream') {
         // The pending chunk and every later one carry has_error.
         hasError = true
