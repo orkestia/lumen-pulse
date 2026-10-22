@@ -1,4 +1,4 @@
-import { defaultContext } from './context.js'
+import { currentPath, defaultContext } from './context.js'
 import {
   ANON_KEY,
   CONSENT_KEY,
@@ -7,7 +7,7 @@ import {
   uuid,
   type StorageLike,
 } from './storage.js'
-import { sendBatch } from './transport.js'
+import { chunkEvents, sendBatch } from './transport.js'
 import type {
   ConsentStatus,
   LumenPulseClient,
@@ -38,12 +38,15 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
 
   let consent: ConsentStatus = loadConsent(storage, config.consent)
   let anonymousId: string | null = consent === 'granted' ? loadOrCreate(storage, ANON_KEY) : null
-  let sessionId = loadOrCreate(storage, SESSION_KEY)
+  // session_id only touches storage once consent is granted; until then it
+  // lives in memory and is persisted on grant (cleared on deny).
+  let sessionId = consent === 'granted' ? loadOrCreate(storage, SESSION_KEY) : uuid()
   let userId: string | null = null
   let orgId: string | null = null
   let queue: PulseEvent[] = []
   let timer: ReturnType<typeof setInterval> | null = null
   let closed = false
+  const cleanups: Array<() => void> = []
 
   const schedule = () => {
     if (timer || closed) return
@@ -72,7 +75,10 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     properties: TrackProperties = {},
     contextPatch: Partial<PulseContext> = {},
   ): PulseEvent => {
-    const base = defaultContext(config.appVersion) as PulseContext
+    const base = defaultContext({
+      appVersion: config.appVersion,
+      includeQueryParams: config.includeQueryParams,
+    }) as PulseContext
     const context: PulseContext = {
       ...base,
       ...contextPatch,
@@ -98,12 +104,15 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
   const flush = async (): Promise<void> => {
     if (queue.length === 0) return
     const batch = queue.splice(0, queue.length)
-    await sendBatch(batch, {
+    const transport = {
       ingestUrl: config.ingestUrl,
       writeKey: config.writeKey,
       fetchImpl,
       ...(config.onError ? { onError: config.onError } : {}),
-    })
+    }
+    // All chunks start synchronously so an unload flush gets every request
+    // out before the page is torn down.
+    await Promise.all(chunkEvents(batch, maxBatchSize).map((chunk) => sendBatch(chunk, transport)))
   }
 
   const client: LumenPulseClient = {
@@ -131,12 +140,13 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
       userId = null
       orgId = null
       sessionId = uuid()
-      storage.setItem(SESSION_KEY, sessionId)
       if (consent === 'granted') {
+        storage.setItem(SESSION_KEY, sessionId)
         anonymousId = uuid()
         storage.setItem(ANON_KEY, anonymousId)
       } else {
         anonymousId = null
+        storage.removeItem(SESSION_KEY)
         storage.removeItem(ANON_KEY)
       }
     },
@@ -146,9 +156,11 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
       storage.setItem(CONSENT_KEY, status)
       if (status === 'granted') {
         anonymousId = loadOrCreate(storage, ANON_KEY)
+        storage.setItem(SESSION_KEY, sessionId)
       } else if (status === 'denied') {
         anonymousId = null
         storage.removeItem(ANON_KEY)
+        storage.removeItem(SESSION_KEY)
         queue = []
       }
     },
@@ -169,15 +181,77 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         clearInterval(timer)
         timer = null
       }
+      while (cleanups.length) cleanups.pop()?.()
       await flush()
     },
   }
 
-  if (config.autocapturePageViews && typeof window !== 'undefined') {
-    client.track('page_view')
+  if (typeof window !== 'undefined') {
+    cleanups.push(listenForUnload(() => void flush()))
+
+    const pageViews = config.autocapture?.pageViews ?? (config.autocapturePageViews === true)
+    if (pageViews === 'history') {
+      let lastPath = currentPath(config.includeQueryParams)
+      client.track('page_view')
+      cleanups.push(
+        watchHistory(() => {
+          if (closed) return
+          const path = currentPath(config.includeQueryParams)
+          if (path === lastPath) return
+          lastPath = path
+          client.track('page_view')
+        }),
+      )
+    } else if (pageViews) {
+      client.track('page_view')
+    }
   }
 
   return client
+}
+
+/**
+ * Flush when the page is hidden or unloaded. `fetch(keepalive)` lets the
+ * request outlive the page; `sendBeacon` cannot carry the X-Api-Key header.
+ */
+function listenForUnload(onHide: () => void): () => void {
+  const onPageHide = () => onHide()
+  const onVisibility = () => {
+    if (document.visibilityState === 'hidden') onHide()
+  }
+  window.addEventListener('pagehide', onPageHide)
+  document.addEventListener('visibilitychange', onVisibility)
+  return () => {
+    window.removeEventListener('pagehide', onPageHide)
+    document.removeEventListener('visibilitychange', onVisibility)
+  }
+}
+
+/** Call `onChange` after pushState / replaceState / popstate. */
+function watchHistory(onChange: () => void): () => void {
+  const history = window.history
+  const originalPush = history.pushState
+  const originalReplace = history.replaceState
+  let active = true
+  const wrap = (original: History['pushState']): History['pushState'] =>
+    function (this: History, ...args: Parameters<History['pushState']>) {
+      const result = original.apply(this, args)
+      if (active) onChange()
+      return result
+    }
+  const wrappedPush = wrap(originalPush)
+  const wrappedReplace = wrap(originalReplace)
+  history.pushState = wrappedPush
+  history.replaceState = wrappedReplace
+  const onPopState = () => onChange()
+  window.addEventListener('popstate', onPopState)
+  return () => {
+    active = false
+    window.removeEventListener('popstate', onPopState)
+    // Only unpatch if nobody wrapped on top of us; otherwise stay as a no-op.
+    if (history.pushState === wrappedPush) history.pushState = originalPush
+    if (history.replaceState === wrappedReplace) history.replaceState = originalReplace
+  }
 }
 
 function loadConsent(storage: StorageLike, initial?: ConsentStatus): ConsentStatus {

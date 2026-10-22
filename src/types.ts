@@ -33,28 +33,54 @@ export interface PulseEvent {
 export interface LumenPulseConfig {
   /** Pulse product write-key (`lump_…`). Never use collector `lumk_` keys. */
   writeKey: string
-  /** Product / project slug, e.g. `posto-regulado`, `faladelivery`. */
+  /** Product / project slug the key is bound to, e.g. `my-landing`. */
   project: string
-  /** Ingest base URL, e.g. `https://api-lumen.example` or same-origin proxy. */
+  /** Ingest base URL, e.g. `https://lumen-api.orkestia.dev` or a same-origin proxy. */
   ingestUrl: string
   /** Optional org UUID when known at init. */
   organizationUuid?: string
   /** Batch flush interval in ms. Default 2000. */
   flushIntervalMs?: number
-  /** Max events per batch. Default 20. */
+  /** Max events per batch. Default 20, capped at 50 (browser key limit). */
   maxBatchSize?: number
-  /** Persist anonymous_id. Default: localStorage when available. */
+  /**
+   * Where anonymous_id / session_id are persisted once consent is granted.
+   * Default: localStorage when available. `null` keeps everything in memory.
+   */
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
   /** Override fetch (tests / non-browser). Default: global fetch. */
   fetch?: typeof fetch
-  /** Autocapture page views when path changes. Default false. */
+  /**
+   * Send one `page_view` at boot. Same as `autocapture: { pageViews: true }`.
+   * Default false.
+   */
   autocapturePageViews?: boolean
+  /** Automatic event capture. */
+  autocapture?: AutocaptureConfig
+  /**
+   * Query params allowed into `context.path`. By default the path is
+   * `location.pathname` only (no query string). Entries are exact names or a
+   * prefix glob ending in `*`, e.g. `['utm_*', 'ref']`.
+   */
+  includeQueryParams?: string[]
   /** App version stamped into context. */
   appVersion?: string
   /** Initial consent. Default `unknown` (no cookie until granted). */
   consent?: ConsentStatus
-  /** Called on transport failures (never throws to the host app). */
+  /**
+   * Called when a batch is dropped (never throws to the host app). Ingest
+   * rejections arrive as `LumenPulseError` with `status` and `code`.
+   */
   onError?: (error: unknown) => void
+}
+
+export interface AutocaptureConfig {
+  /**
+   * `true` sends one `page_view` at boot. `'history'` also sends one on every
+   * `pushState` / `replaceState` / `popstate` that changes the path (SPA
+   * routing), deduplicated by path. Default false.
+   */
+  pageViews?: boolean | 'history'
 }
 
 export type TrackProperties = Record<string, unknown>
@@ -67,5 +93,6 @@ export interface LumenPulseClient {
   getAnonymousId(): string | null
   getSessionId(): string
   flush(): Promise<void>
+  /** Flush, stop the timer and remove page listeners / history hooks. */
   shutdown(): Promise<void>
 }
