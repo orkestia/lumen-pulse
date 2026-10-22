@@ -58,6 +58,12 @@ export interface LumenPulseConfig {
   /** Automatic event capture. */
   autocapture?: AutocaptureConfig
   /**
+   * Send uncaught errors and unhandled promise rejections as `$exception`
+   * events, which Lumen groups as errors. Default false. `captureException()`
+   * works either way.
+   */
+  captureErrors?: boolean | CaptureErrorsConfig
+  /**
    * Query params allowed into `context.path`. By default the path is
    * `location.pathname` only (no query string). Entries are exact names or a
    * prefix glob ending in `*`, e.g. `['utm_*', 'ref']`.
@@ -83,11 +89,36 @@ export interface AutocaptureConfig {
   pageViews?: boolean | 'history'
 }
 
+export interface CaptureErrorsConfig {
+  /**
+   * Drop errors whose message (or `Name: message`) contains a string or
+   * matches a RegExp. Cross-origin `Script error.` is always dropped.
+   */
+  ignore?: (string | RegExp)[]
+  /** Fraction of errors kept, 0 to 1. Default 1. */
+  sampleRate?: number
+  /** Most `$exception` events sent per minute (first sends + repeat summaries). Default 10. */
+  maxPerMinute?: number
+  /** Build / release id. Default `appVersion`. */
+  release?: string
+  /** e.g. `production`, `staging`. */
+  environment?: string
+}
+
+/** How an error reached the SDK. */
+export type ErrorMechanism = 'onerror' | 'unhandledrejection' | 'manual'
+
 export type TrackProperties = Record<string, unknown>
 
 export interface LumenPulseClient {
   track(eventName: string, properties?: TrackProperties, context?: Partial<PulseContext>): void
   identify(userId: string, traits?: TrackProperties): void
+  /**
+   * Report a handled error (error boundary, fetch wrapper) as `$exception`
+   * with `handled: true`. `extra` is merged into properties but cannot
+   * override `name`, `message`, `stack`, `handled`, `mechanism` or `count`.
+   */
+  captureException(error: unknown, extra?: TrackProperties): void
   reset(): void
   setConsent(status: ConsentStatus): void
   getAnonymousId(): string | null

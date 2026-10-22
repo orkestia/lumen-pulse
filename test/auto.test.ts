@@ -79,4 +79,21 @@ describe('auto.ts boot', () => {
     expect(fetchMock).not.toHaveBeenCalled()
     expect(Object.keys(localStorage).filter((k) => k.startsWith('lumen_pulse.'))).toEqual([])
   })
+
+  it('captures uncaught errors with data-capture-errors="true"', async () => {
+    addScript({
+      'data-write-key': 'lump_test',
+      'data-project': 'my-landing',
+      'data-ingest-url': 'https://lumen-api.example',
+      'data-consent': 'granted',
+      'data-capture-errors': 'true',
+    })
+    const api = await boot()
+    window.dispatchEvent(new ErrorEvent('error', { message: 'boom', error: new Error('boom') }))
+    await api.client!.flush()
+    const events = fetchMock.mock.calls.flatMap(
+      ([, init]) => (JSON.parse(String(init?.body)) as { events: PulseEvent[] }).events,
+    )
+    expect(events.map((e) => [e.event_name, e.properties.message])).toEqual([['$exception', 'boom']])
+  })
 })

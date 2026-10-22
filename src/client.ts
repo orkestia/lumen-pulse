@@ -1,5 +1,19 @@
 import { currentPath, defaultContext } from './context.js'
 import {
+  EXCEPTION_EVENT,
+  ErrorDeduper,
+  exceptionProperties,
+  fingerprintOf,
+  fromErrorEvent,
+  fromRejection,
+  isIgnored,
+  isOpaqueScriptError,
+  normalizeError,
+  resolveErrorOptions,
+  type EmitRequest,
+  type NormalizedError,
+} from './errors.js'
+import {
   ANON_KEY,
   CONSENT_KEY,
   SESSION_KEY,
@@ -10,6 +24,7 @@ import {
 import { chunkEvents, sendBatch } from './transport.js'
 import type {
   ConsentStatus,
+  ErrorMechanism,
   LumenPulseClient,
   LumenPulseConfig,
   PulseContext,
@@ -19,6 +34,8 @@ import type {
 
 const DEFAULT_FLUSH_MS = 2000
 const DEFAULT_BATCH = 20
+/** Errors flush after this short delay instead of the full interval (bursts still batch). */
+const ERROR_FLUSH_DELAY_MS = 250
 
 export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
   if (!config.writeKey) throw new Error('lumen-pulse: writeKey is required')
@@ -45,16 +62,29 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
   let orgId: string | null = null
   let queue: PulseEvent[] = []
   let timer: ReturnType<typeof setInterval> | null = null
+  let errorTimer: ReturnType<typeof setTimeout> | null = null
   let closed = false
   const cleanups: Array<() => void> = []
+  const errorOptions = resolveErrorOptions(config.captureErrors, config.appVersion)
+  const deduper = new ErrorDeduper(errorOptions.maxPerMinute)
 
   const schedule = () => {
     if (timer || closed) return
     timer = setInterval(() => {
-      void flush()
+      void flushQueue(false)
     }, flushIntervalMs)
     // Node timers support unref; browsers do not
     const t = timer as unknown as { unref?: () => void }
+    t.unref?.()
+  }
+
+  const scheduleErrorFlush = () => {
+    if (errorTimer || closed) return
+    errorTimer = setTimeout(() => {
+      errorTimer = null
+      void flushQueue(false)
+    }, Math.min(ERROR_FLUSH_DELAY_MS, flushIntervalMs))
+    const t = errorTimer as unknown as { unref?: () => void }
     t.unref?.()
   }
 
@@ -64,7 +94,7 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     if (consent !== 'granted') return
     queue.push(event)
     if (queue.length >= maxBatchSize) {
-      void flush()
+      void flushQueue(false)
     } else {
       schedule()
     }
@@ -101,7 +131,43 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     return event
   }
 
-  const flush = async (): Promise<void> => {
+  const exceptionEvent = (emit: EmitRequest): PulseEvent => {
+    const patch: Partial<PulseContext> = {}
+    if (emit.path !== undefined) patch.path = emit.path
+    // The ingest bridge reads the error's release from context.app_version.
+    if (errorOptions.release) patch.app_version = errorOptions.release
+    return buildEvent(EXCEPTION_EVENT, emit.properties, patch)
+  }
+
+  const captureError = (
+    error: NormalizedError,
+    handled: boolean,
+    mechanism: ErrorMechanism,
+    extra?: TrackProperties,
+  ) => {
+    if (closed || consent !== 'granted') return
+    if (isIgnored(error, errorOptions.ignore)) return
+    if (errorOptions.sampleRate < 1 && Math.random() >= errorOptions.sampleRate) return
+    const properties = exceptionProperties(error, handled, mechanism, errorOptions, extra)
+    const path = typeof location !== 'undefined' ? currentPath(config.includeQueryParams) : undefined
+    const emit = deduper.record(fingerprintOf(error), properties, path)
+    if (emit) {
+      enqueue(exceptionEvent(emit))
+      scheduleErrorFlush()
+    } else if (deduper.hasPending()) {
+      // The interval tick sends the repeat summary once its window is due.
+      schedule()
+    }
+  }
+
+  /**
+   * Send the queue. `force` also sends repeat summaries that are not due yet
+   * (explicit flush, unload, shutdown).
+   */
+  const flushQueue = async (force: boolean): Promise<void> => {
+    if (consent === 'granted') {
+      for (const emit of deduper.drain(force)) queue.push(exceptionEvent(emit))
+    }
     if (queue.length === 0) return
     const batch = queue.splice(0, queue.length)
     const transport = {
@@ -114,6 +180,8 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     // out before the page is torn down.
     await Promise.all(chunkEvents(batch, maxBatchSize).map((chunk) => sendBatch(chunk, transport)))
   }
+
+  const flush = (): Promise<void> => flushQueue(true)
 
   const client: LumenPulseClient = {
     track(eventName, properties = {}, context) {
@@ -136,10 +204,19 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
       )
     },
 
+    captureException(error, extra) {
+      try {
+        captureError(normalizeError(error), true, 'manual', extra)
+      } catch {
+        // never throw into the host app
+      }
+    },
+
     reset() {
       userId = null
       orgId = null
       sessionId = uuid()
+      deduper.clear() // dedup is per session
       if (consent === 'granted') {
         storage.setItem(SESSION_KEY, sessionId)
         anonymousId = uuid()
@@ -162,6 +239,7 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         storage.removeItem(ANON_KEY)
         storage.removeItem(SESSION_KEY)
         queue = []
+        deduper.clear()
       }
     },
 
@@ -181,6 +259,10 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         clearInterval(timer)
         timer = null
       }
+      if (errorTimer) {
+        clearTimeout(errorTimer)
+        errorTimer = null
+      }
       while (cleanups.length) cleanups.pop()?.()
       await flush()
     },
@@ -188,6 +270,18 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
 
   if (typeof window !== 'undefined') {
     cleanups.push(listenForUnload(() => void flush()))
+
+    if (config.captureErrors) {
+      cleanups.push(
+        listenForErrors(
+          (event) => {
+            if (isOpaqueScriptError(event)) return
+            captureError(fromErrorEvent(event), false, 'onerror')
+          },
+          (reason) => captureError(fromRejection(reason), false, 'unhandledrejection'),
+        ),
+      )
+    }
 
     const pageViews = config.autocapture?.pageViews ?? (config.autocapturePageViews === true)
     if (pageViews === 'history') {
@@ -224,6 +318,39 @@ function listenForUnload(onHide: () => void): () => void {
   return () => {
     window.removeEventListener('pagehide', onPageHide)
     document.removeEventListener('visibilitychange', onVisibility)
+  }
+}
+
+/**
+ * Uncaught errors and unhandled rejections. Only `ErrorEvent`s are handled:
+ * resource load failures (img, script) do not bubble to window and carry no
+ * message. Handlers never throw.
+ */
+function listenForErrors(
+  onError: (event: ErrorEvent) => void,
+  onRejection: (reason: unknown) => void,
+): () => void {
+  const handleError = (event: Event) => {
+    try {
+      const e = event as ErrorEvent
+      if (typeof e.message !== 'string' && e.error === undefined) return
+      onError(e)
+    } catch {
+      // never throw from a global error handler
+    }
+  }
+  const handleRejection = (event: Event) => {
+    try {
+      onRejection((event as PromiseRejectionEvent).reason)
+    } catch {
+      // never throw from a global error handler
+    }
+  }
+  window.addEventListener('error', handleError)
+  window.addEventListener('unhandledrejection', handleRejection)
+  return () => {
+    window.removeEventListener('error', handleError)
+    window.removeEventListener('unhandledrejection', handleRejection)
   }
 }
 

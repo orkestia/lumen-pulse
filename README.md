@@ -12,7 +12,7 @@ License: [MIT](./LICENSE).
 ## Install
 
 ```bash
-npm i github:orkestia/lumen-pulse#v0.2.0
+npm i github:orkestia/lumen-pulse#v0.3.0
 ```
 
 The package is installed from GitHub, not from the npm registry. npm runs the
@@ -73,6 +73,7 @@ Host `dist/auto.js` yourself (for example in your site's static assets):
 | `data-autocapture` | `true` = one `page_view` at boot; `history` = also on SPA navigation |
 | `data-include-query-params` | Comma-separated allowlist for `context.path` (see below) |
 | `data-organization-uuid` | Optional organization UUID stamped on events |
+| `data-capture-errors` | `true` = send uncaught errors (see [Browser errors](#browser-errors)) |
 
 ## Keys: `lump_` vs `lumk_`
 
@@ -122,6 +123,7 @@ Pass `storage: null` to keep everything in memory.
 | `maxBatchSize` | `20` | Events per request, capped at 50 |
 | `organizationUuid` | none | Stamped on every event |
 | `appVersion` | none | Stamped into `context.app_version` |
+| `captureErrors` | `false` | `true` or `{ ignore, sampleRate, maxPerMinute, release, environment }`: send uncaught errors (see [Browser errors](#browser-errors)) |
 | `storage` | localStorage | Where ids persist after consent; `null` = memory |
 | `fetch` | global `fetch` | Override for tests or non-browser runtimes |
 | `onError` | none | Called when a batch is dropped (never throws into your app) |
@@ -132,11 +134,91 @@ Pass `storage: null` to keep everything in memory.
 |--------|---------|
 | `track(name, props?, context?)` | Queue a product event |
 | `identify(userId, traits?)` | Set `user_id` and emit `identity.alias` |
+| `captureException(error, extra?)` | Report a handled error as `$exception` (`handled: true`) |
 | `setConsent('granted' \| 'denied' \| 'unknown')` | Consent gate; no events until `granted` |
 | `reset()` | New anonymous id and session after logout |
 | `flush()` | Send queued events now |
 | `shutdown()` | Flush, stop the timer, remove page listeners and history hooks |
 | `getAnonymousId()` / `getSessionId()` | Inspect ids |
+
+## Browser errors
+
+With `captureErrors` on, the SDK listens for uncaught errors (`window`
+`error`) and unhandled promise rejections and sends each as the reserved
+event **`$exception`**. The Lumen ingest API turns every `$exception` into a
+Lumen log entry (redacted, fingerprinted, `audience=code`) under the key's
+organization and project, so it shows up as an **error group** next to your
+server errors. A slim product event is kept too, so Pulse can count errors per
+page and session.
+
+```ts
+const pulse = createLumenPulse({
+  // …
+  appVersion: '1.4.0',
+  captureErrors: {
+    environment: 'production',
+    ignore: ['ResizeObserver loop', /^chrome-extension:/],
+    sampleRate: 1,       // 0 to 1
+    maxPerMinute: 10,    // default
+  },
+})
+
+// handled errors: React error boundaries, fetch wrappers, catch blocks
+try {
+  await save()
+} catch (err) {
+  pulse.captureException(err, { feature: 'checkout' })
+}
+```
+
+`$exception` properties:
+
+| Property | Value |
+|----------|-------|
+| `name` | Error class, e.g. `TypeError`. Non-Error rejections are `UnhandledRejection` |
+| `message` | Up to 1000 chars. Thrown strings are the message; plain objects use their `message` or their JSON |
+| `stack` | Up to 10000 chars, when the browser gives one. Without an Error object, one frame is built from the event's file, line and column |
+| `handled` | `false` for listeners, `true` for `captureException()` |
+| `mechanism` | `onerror`, `unhandledrejection` or `manual` |
+| `release`, `environment` | From `captureErrors`; `release` defaults to `appVersion` and is also sent as `context.app_version`, which is where the server reads it |
+| `count` | Occurrences this event stands for (see below) |
+
+`context.path` follows the same privacy rules as other events (no query string).
+`extra` on `captureException()` is merged in but cannot override the fields above.
+
+**Dedup and cap.** Within a session, an error is identified by name, message and
+top stack frame. The first occurrence is sent right away with `count: 1`.
+Repeats are counted, not sent; one follow-up `$exception` with
+`count: <repeats>` goes out at most once a minute per error, and on `flush()`,
+page hide and `shutdown()`. Every sent `$exception` (first or follow-up) counts
+toward `maxPerMinute` (default 10): a new error over the cap is dropped, a
+follow-up over the cap waits. `reset()` and denied consent clear the counts. The
+server also caps each session at 10 `$exception` per minute.
+
+**Consent.** Errors follow the same gate as every other event: nothing is
+captured or counted before consent is `granted`.
+
+**Delivery.** Errors are sent about 250 ms after they happen rather than at the
+next 2 s tick, so an error that kills the page still has a good chance to get
+out; errors in the same burst share one request.
+
+**Third-party scripts.** Errors from a script on another origin reach the page
+as a bare `Script error.` with no message or stack. The SDK drops these. To get
+the real error, serve the script with CORS headers and load it with
+`crossorigin="anonymous"`:
+
+```html
+<script src="https://cdn.example.com/widget.js" crossorigin="anonymous"></script>
+```
+
+**No personal data in messages.** The server redacts emails, CPFs and other
+known patterns from message and stack, but do not build error messages from
+user input, names or ids in the first place.
+
+**Source maps are not supported yet.** Stacks from minified bundles are stored
+as they are. Grouping still works by location (origin, query and chunk hashes
+are stripped server-side, so a redeploy does not split groups), but frames are
+not symbolicated.
 
 ## Delivery
 
