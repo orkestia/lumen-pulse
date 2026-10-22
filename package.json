@@ -1,6 +1,6 @@
 {
   "name": "@orkestia/lumen-pulse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Framework-agnostic Lumen Pulse client: consent-gated product analytics for any web UI (anonymous + authenticated).",
   "type": "module",
   "license": "MIT",

@@ -7,7 +7,8 @@
  *     data-ingest-url="https://lumen-api.orkestia.dev"
  *     data-consent="granted"
  *     data-autocapture="history"
- *     data-include-query-params="utm_*,ref"></script>
+ *     data-include-query-params="utm_*,ref"
+ *     data-capture-errors="true"></script>
  *
  * Exposes `window.LumenPulse` as the client instance (or factory via create).
  */
@@ -50,6 +51,7 @@ function readScriptConfig(): Partial<LumenPulseConfig> | null {
           .map((p) => p.trim())
           .filter(Boolean)
       }
+      if (el.getAttribute('data-capture-errors') === 'true') cfg.captureErrors = true
       const org = el.getAttribute('data-organization-uuid')
       if (org) cfg.organizationUuid = org
       return cfg

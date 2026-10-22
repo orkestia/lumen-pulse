@@ -8,12 +8,15 @@
  *   pulse.setConsent('granted')
  *   pulse.track('page_view')
  *   pulse.identify(userId)
+ *   pulse.captureException(err)
  */
 
 export { createLumenPulse } from './client.js'
 export type {
   AutocaptureConfig,
+  CaptureErrorsConfig,
   ConsentStatus,
+  ErrorMechanism,
   LumenPulseClient,
   LumenPulseConfig,
   PulseContext,
