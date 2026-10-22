@@ -13,6 +13,7 @@ import {
   type EmitRequest,
   type NormalizedError,
 } from './errors.js'
+import { createReplayRecorder, resolveReplayOptions, type ReplayRecorder } from './replay.js'
 import {
   ANON_KEY,
   CONSENT_KEY,
@@ -67,6 +68,22 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
   const cleanups: Array<() => void> = []
   const errorOptions = resolveErrorOptions(config.captureErrors, config.appVersion)
   const deduper = new ErrorDeduper(errorOptions.maxPerMinute)
+  const transport = {
+    ingestUrl: config.ingestUrl,
+    writeKey: config.writeKey,
+    fetchImpl,
+    ...(config.onError ? { onError: config.onError } : {}),
+  }
+  const replayOptions = resolveReplayOptions(config.replay)
+  const replay: ReplayRecorder | null = replayOptions
+    ? createReplayRecorder(replayOptions, {
+        project: config.project,
+        storage,
+        transport,
+        includeQueryParams: config.includeQueryParams,
+        identity: () => ({ sessionId, userId, anonymousId }),
+      })
+    : null
 
   const schedule = () => {
     if (timer || closed) return
@@ -148,6 +165,7 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     if (closed || consent !== 'granted') return
     if (isIgnored(error, errorOptions.ignore)) return
     if (errorOptions.sampleRate < 1 && Math.random() >= errorOptions.sampleRate) return
+    replay?.errorCaptured()
     const properties = exceptionProperties(error, handled, mechanism, errorOptions, extra)
     const path = typeof location !== 'undefined' ? currentPath(config.includeQueryParams) : undefined
     const emit = deduper.record(fingerprintOf(error), properties, path)
@@ -170,18 +188,14 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     }
     if (queue.length === 0) return
     const batch = queue.splice(0, queue.length)
-    const transport = {
-      ingestUrl: config.ingestUrl,
-      writeKey: config.writeKey,
-      fetchImpl,
-      ...(config.onError ? { onError: config.onError } : {}),
-    }
     // All chunks start synchronously so an unload flush gets every request
     // out before the page is torn down.
     await Promise.all(chunkEvents(batch, maxBatchSize).map((chunk) => sendBatch(chunk, transport)))
   }
 
-  const flush = (): Promise<void> => flushQueue(true)
+  const flush = async (): Promise<void> => {
+    await Promise.all([flushQueue(true), replay?.flush()])
+  }
 
   const client: LumenPulseClient = {
     track(eventName, properties = {}, context) {
@@ -213,6 +227,8 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     },
 
     reset() {
+      // The pending replay chunk still belongs to the old session and user.
+      replay?.endSession()
       userId = null
       orgId = null
       sessionId = uuid()
@@ -226,6 +242,7 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         storage.removeItem(SESSION_KEY)
         storage.removeItem(ANON_KEY)
       }
+      if (consent === 'granted') replay?.start() // new session, new sampling decision
     },
 
     setConsent(status) {
@@ -234,12 +251,16 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
       if (status === 'granted') {
         anonymousId = loadOrCreate(storage, ANON_KEY)
         storage.setItem(SESSION_KEY, sessionId)
+        if (!closed) replay?.start()
       } else if (status === 'denied') {
         anonymousId = null
         storage.removeItem(ANON_KEY)
         storage.removeItem(SESSION_KEY)
         queue = []
         deduper.clear()
+        replay?.stop(true)
+      } else {
+        replay?.stop(false)
       }
     },
 
@@ -264,7 +285,7 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         errorTimer = null
       }
       while (cleanups.length) cleanups.pop()?.()
-      await flush()
+      await Promise.all([flushQueue(true), replay?.shutdown()])
     },
   }
 
@@ -282,6 +303,9 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         ),
       )
     }
+
+    // Loads rrweb only now, and only when replay is on and consent granted.
+    if (consent === 'granted') replay?.start()
 
     const pageViews = config.autocapture?.pageViews ?? (config.autocapturePageViews === true)
     if (pageViews === 'history') {

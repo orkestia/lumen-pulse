@@ -8,7 +8,12 @@
  *     data-consent="granted"
  *     data-autocapture="history"
  *     data-include-query-params="utm_*,ref"
- *     data-capture-errors="true"></script>
+ *     data-capture-errors="true"
+ *     data-replay="true"
+ *     data-replay-sample-rate="0.1"></script>
+ *
+ * With replay on, host the `auto-rrweb-record-*.js` chunk next to `auto.js`; it is
+ * fetched only once replay starts (consent granted).
  *
  * Exposes `window.LumenPulse` as the client instance (or factory via create).
  */
@@ -52,6 +57,10 @@ function readScriptConfig(): Partial<LumenPulseConfig> | null {
           .filter(Boolean)
       }
       if (el.getAttribute('data-capture-errors') === 'true') cfg.captureErrors = true
+      if (el.getAttribute('data-replay') === 'true') {
+        const rate = Number.parseFloat(el.getAttribute('data-replay-sample-rate') ?? '')
+        cfg.replay = Number.isFinite(rate) ? { sampleRate: rate } : true
+      }
       const org = el.getAttribute('data-organization-uuid')
       if (org) cfg.organizationUuid = org
       return cfg

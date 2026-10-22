@@ -1,6 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LumenPulseGlobal } from '../src/auto.js'
+import type { RecordOptions } from '../src/replay.js'
 import type { PulseEvent } from '../src/types.js'
+
+const rr = vi.hoisted(() => ({ options: [] as RecordOptions[] }))
+
+vi.mock('rrweb', () => ({
+  record: vi.fn((options: RecordOptions) => {
+    rr.options.push(options)
+    return () => {}
+  }),
+}))
 
 function addScript(attrs: Record<string, string>) {
   const el = document.createElement('script')
@@ -21,6 +31,7 @@ describe('auto.ts boot', () => {
   beforeEach(() => {
     localStorage.clear()
     fetchMock.mockClear()
+    rr.options.length = 0
     vi.stubGlobal('fetch', fetchMock)
     window.history.replaceState(null, '', '/landing?utm_source=ads&token=secret')
   })
@@ -95,5 +106,36 @@ describe('auto.ts boot', () => {
       ([, init]) => (JSON.parse(String(init?.body)) as { events: PulseEvent[] }).events,
     )
     expect(events.map((e) => [e.event_name, e.properties.message])).toEqual([['$exception', 'boom']])
+  })
+
+  it('records a masked session replay with data-replay="true"', async () => {
+    addScript({
+      'data-write-key': 'lump_test',
+      'data-project': 'my-landing',
+      'data-ingest-url': 'https://lumen-api.example',
+      'data-consent': 'granted',
+      'data-replay': 'true',
+      'data-replay-sample-rate': '1',
+    })
+    const api = await boot()
+    await vi.waitFor(() => expect(rr.options).toHaveLength(1))
+    expect(rr.options[0]!.maskTextSelector).toBe('*')
+    expect(rr.options[0]!.checkoutEveryNms).toBeUndefined() // sampled: streaming
+    rr.options[0]!.emit({ type: 3, timestamp: Date.now(), data: {} })
+    await api.client!.flush()
+    const urls = fetchMock.mock.calls.map(([url]) => url)
+    expect(urls).toContain('https://lumen-api.example/api/product/replay/chunk')
+  })
+
+  it('does not load rrweb without data-replay', async () => {
+    addScript({
+      'data-write-key': 'lump_test',
+      'data-project': 'my-landing',
+      'data-ingest-url': 'https://lumen-api.example',
+      'data-consent': 'granted',
+    })
+    await boot()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(rr.options).toHaveLength(0)
   })
 })
