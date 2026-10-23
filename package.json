@@ -1,7 +1,7 @@
 {
   "name": "@orkestia/lumen-pulse",
-  "version": "0.3.0",
-  "description": "Framework-agnostic Lumen Pulse client: consent-gated product analytics for any web UI (anonymous + authenticated).",
+  "version": "0.4.0",
+  "description": "Framework-agnostic Lumen Pulse client: consent-gated product analytics, error capture and masked session replay for any web UI.",
   "type": "module",
   "license": "MIT",
   "author": "Orkestia",
@@ -35,7 +35,7 @@
     "./dist/auto.js"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/auto.ts --format esm --dts --clean",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
     "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -61,5 +61,8 @@
     "tsup": "^9.0.0",
     "typescript": "^5.8.0",
     "vitest": "^5.0.0"
+  },
+  "dependencies": {
+    "rrweb": "2.1.7"
   }
 }

@@ -21,6 +21,10 @@ export type {
   LumenPulseConfig,
   PulseContext,
   PulseEvent,
+  ReplayChunk,
+  ReplayConfig,
+  ReplayMaskLevel,
+  ReplayTrigger,
   SignalKind,
   TrackProperties,
 } from './types.js'

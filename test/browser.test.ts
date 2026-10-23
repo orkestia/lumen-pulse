@@ -153,6 +153,8 @@ describe('session_id and consent', () => {
     const storage = memoryStorage()
     storage.setItem(CONSENT_KEY, 'granted')
     storage.setItem(SESSION_KEY, 'persisted-session')
+    storage.setItem('lumen_pulse.session_start', String(Date.now() - 60_000))
+    storage.setItem('lumen_pulse.session_last', String(Date.now() - 1_000))
     const { pulse } = make({ storage, consent: 'unknown' })
     expect(pulse.getSessionId()).toBe('persisted-session')
   })

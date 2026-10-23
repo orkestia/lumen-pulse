@@ -64,6 +64,11 @@ export interface LumenPulseConfig {
    */
   captureErrors?: boolean | CaptureErrorsConfig
   /**
+   * Masked session replay (rrweb), loaded on demand once consent is
+   * `granted`. `true` uses the defaults. Default off.
+   */
+  replay?: boolean | ReplayConfig
+  /**
    * Query params allowed into `context.path`. By default the path is
    * `location.pathname` only (no query string). Entries are exact names or a
    * prefix glob ending in `*`, e.g. `['utm_*', 'ref']`.
@@ -71,6 +76,14 @@ export interface LumenPulseConfig {
   includeQueryParams?: string[]
   /** App version stamped into context. */
   appVersion?: string
+  /**
+   * Minutes without activity (tracked events, errors, user input seen by
+   * replay, the tab becoming visible) after which a new session_id starts.
+   * Default 30.
+   */
+  sessionTimeoutMinutes?: number
+  /** Hours after which a session is rotated even while active. Default 24. */
+  sessionMaxHours?: number
   /** Initial consent. Default `unknown` (no cookie until granted). */
   consent?: ConsentStatus
   /**
@@ -105,6 +118,51 @@ export interface CaptureErrorsConfig {
   environment?: string
 }
 
+export interface ReplayConfig {
+  /** Fraction of sessions recorded from the start, 0 to 1. Default 0.1. */
+  sampleRate?: number
+  /**
+   * Fraction of unsampled sessions whose last `bufferSeconds` are uploaded
+   * when an error is captured (they then keep recording). Default 1.
+   */
+  onErrorSampleRate?: number
+  /** Seconds kept in memory for unsampled sessions. Default 60. */
+  bufferSeconds?: number
+  /** Replace all page text with `*`. Also masks inputs. Default true. */
+  maskAllText?: boolean
+  /** Replace all input values with `*`. Default true. */
+  maskAllInputs?: boolean
+  /** Elements matching this selector (and their children) are not recorded. Default `[data-private]`. */
+  blockSelector?: string
+  /**
+   * Most gzip bytes per uploaded chunk. Default 45000, which keeps the
+   * base64 request body near 60 KB, inside the browser's keepalive budget.
+   */
+  maxChunkBytes?: number
+}
+
+/** What each replay chunk declares about masking. */
+export type ReplayMaskLevel = 'all' | 'inputs' | 'none'
+
+/** Why a replay chunk was uploaded. */
+export type ReplayTrigger = 'sampled' | 'error'
+
+/** Body of `POST /api/product/replay/chunk`. */
+export interface ReplayChunk {
+  project: string
+  session_id: string
+  seq: number
+  started_at: string
+  ended_at: string
+  mask_level: ReplayMaskLevel
+  trigger: ReplayTrigger
+  has_error: boolean
+  user_id: string
+  anonymous_id: string
+  /** base64 of gzip(JSON array of rrweb events). */
+  data: string
+}
+
 /** How an error reached the SDK. */
 export type ErrorMechanism = 'onerror' | 'unhandledrejection' | 'manual'
 
@@ -124,6 +182,6 @@ export interface LumenPulseClient {
   getAnonymousId(): string | null
   getSessionId(): string
   flush(): Promise<void>
-  /** Flush, stop the timer and remove page listeners / history hooks. */
+  /** Flush, stop the timer and replay recording, and remove page listeners / history hooks. */
   shutdown(): Promise<void>
 }

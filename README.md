@@ -4,15 +4,17 @@ Framework-agnostic **Lumen Pulse** client. Add consent-gated product analytics t
 any web UI (React, Vue, Svelte, vanilla, static landings) without framework adapters.
 
 It tracks **anonymous** and **authenticated** behaviour, gates everything on
-consent, and stitches the two with an `identity.alias` event on login. No runtime
-dependencies.
+consent, and stitches the two with an `identity.alias` event on login. It can
+also send browser errors and record masked [session replays](#session-replay).
+The only runtime dependency is `rrweb`, which is loaded on demand and only when
+replay is on.
 
 License: [MIT](./LICENSE).
 
 ## Install
 
 ```bash
-npm i github:orkestia/lumen-pulse#v0.3.0
+npm i github:orkestia/lumen-pulse#v0.4.0
 ```
 
 The package is installed from GitHub, not from the npm registry. npm runs the
@@ -47,7 +49,10 @@ closed. `await pulse.flush()` sends right away.
 
 ## Script tag (no bundler)
 
-Host `dist/auto.js` yourself (for example in your site's static assets):
+Host `dist/auto.js` yourself (for example in your site's static assets). With
+session replay on, also host the `dist/auto-rrweb-record-*.js` chunk in the same
+folder; `auto.js` fetches it only once replay starts. Copying the whole `dist/`
+folder covers both.
 
 ```html
 <script
@@ -74,6 +79,8 @@ Host `dist/auto.js` yourself (for example in your site's static assets):
 | `data-include-query-params` | Comma-separated allowlist for `context.path` (see below) |
 | `data-organization-uuid` | Optional organization UUID stamped on events |
 | `data-capture-errors` | `true` = send uncaught errors (see [Browser errors](#browser-errors)) |
+| `data-replay` | `true` = record masked session replays with the defaults (see [Session replay](#session-replay)) |
+| `data-replay-sample-rate` | Fraction of sessions recorded from the start, 0 to 1 (default `0.1`) |
 
 ## Keys: `lump_` vs `lumk_`
 
@@ -98,6 +105,23 @@ Nothing is sent and nothing but the consent choice is stored until consent is
 
 The choice itself is stored under `lumen_pulse.consent` so it survives reloads.
 Pass `storage: null` to keep everything in memory.
+
+## Sessions
+
+A `session_id` ends after **30 minutes without activity** (`sessionTimeoutMinutes`)
+or **24 hours after it started** even while active (`sessionMaxHours`). The next
+activity then starts a new one. Activity is any tracked event, `identify()`, a
+captured error, user input seen by session replay (mouse, scroll, typing,
+touch), or the tab becoming visible again. DOM changes alone do not keep a
+session alive.
+
+The start and last-activity times follow the same consent rules as
+`session_id`: in memory before consent, stored under `lumen_pulse.session_start`
+and `lumen_pulse.session_last` once granted, removed on `denied`. Tabs of the
+same browser share the stored session: a tab that comes back after another tab
+already started a new session joins it. A new session also starts error dedup
+and the replay sampling decision over. Sessions stored by v0.3 (no times) are
+replaced on the first load of v0.4.
 
 ## Privacy defaults
 
@@ -124,6 +148,9 @@ Pass `storage: null` to keep everything in memory.
 | `organizationUuid` | none | Stamped on every event |
 | `appVersion` | none | Stamped into `context.app_version` |
 | `captureErrors` | `false` | `true` or `{ ignore, sampleRate, maxPerMinute, release, environment }`: send uncaught errors (see [Browser errors](#browser-errors)) |
+| `replay` | `false` | `true` or `{ sampleRate, onErrorSampleRate, bufferSeconds, maskAllText, maskAllInputs, blockSelector, maxChunkBytes }`: masked session replay (see [Session replay](#session-replay)) |
+| `sessionTimeoutMinutes` | `30` | Idle minutes before a new `session_id` (see [Sessions](#sessions)) |
+| `sessionMaxHours` | `24` | Hours before a new `session_id` even while active |
 | `storage` | localStorage | Where ids persist after consent; `null` = memory |
 | `fetch` | global `fetch` | Override for tests or non-browser runtimes |
 | `onError` | none | Called when a batch is dropped (never throws into your app) |
@@ -138,7 +165,7 @@ Pass `storage: null` to keep everything in memory.
 | `setConsent('granted' \| 'denied' \| 'unknown')` | Consent gate; no events until `granted` |
 | `reset()` | New anonymous id and session after logout |
 | `flush()` | Send queued events now |
-| `shutdown()` | Flush, stop the timer, remove page listeners and history hooks |
+| `shutdown()` | Flush, stop the timer and replay recording, remove page listeners and history hooks |
 | `getAnonymousId()` / `getSessionId()` | Inspect ids |
 
 ## Browser errors
@@ -220,6 +247,98 @@ as they are. Grouping still works by location (origin, query and chunk hashes
 are stripped server-side, so a redeploy does not split groups), but frames are
 not symbolicated.
 
+## Session replay
+
+With `replay` on, the SDK records the page with [rrweb](https://github.com/rrweb-io/rrweb)
+and uploads masked recordings to Lumen, where your team plays them back next to
+the session's events and errors.
+
+```ts
+const pulse = createLumenPulse({
+  // …
+  captureErrors: true,
+  replay: {
+    sampleRate: 0.1,         // 10% of sessions recorded from the start
+    onErrorSampleRate: 1,    // other sessions: upload the last 60 s when an error happens
+    bufferSeconds: 60,
+    // privacy defaults, shown for clarity:
+    maskAllText: true,
+    maskAllInputs: true,
+    blockSelector: '[data-private]',
+  },
+})
+```
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `sampleRate` | `0.1` | Fraction of sessions recorded from the start |
+| `onErrorSampleRate` | `1` | Fraction of the other sessions that upload their buffer when an error is captured |
+| `bufferSeconds` | `60` | Seconds kept in memory for sessions that are not sampled |
+| `maskAllText` | `true` | Replace all page text with `*`. Also masks inputs |
+| `maskAllInputs` | `true` | Replace input values with `*`. Passwords are always masked |
+| `blockSelector` | `[data-private]` | Matching elements and their children are not recorded; playback shows an empty box of the same size |
+| `maxChunkBytes` | `45000` | Most gzip bytes per upload. base64 makes the request about 60 KB, inside the keepalive budget |
+
+**Privacy defaults.** Out of the box all text and every input value are replaced
+with `*` in the browser, before anything is uploaded, and elements marked
+`data-private` are not recorded at all. Mark anything sensitive that should not
+appear even as a masked shape:
+
+```html
+<section data-private>…</section>
+```
+
+The recorded page URL keeps only the path and the params allowed by
+`includeQueryParams`; the query string and fragment are dropped. Canvas, fonts
+and cross-origin iframes are not recorded. Each upload declares its
+`mask_level` (`all`, `inputs`, or `none` when both masks are off), and Lumen
+rejects `none` unless your plan explicitly allows unmasked replay.
+
+**Consent.** Nothing is recorded, buffered or loaded before consent is
+`granted`. rrweb is imported with a dynamic `import()` at that moment, so apps
+without replay, and visitors who never consent, never download it (your
+bundler puts it in its own lazy chunk; the record-only part is about 60 KB
+gzip). Setting consent to `denied` stops recording and drops anything not yet
+uploaded; `unknown` stops it too. `reset()` uploads what is pending for the old
+session and makes a new sampling decision for the new one.
+
+**Sampling.** The decision is made once per `session_id` and stored next to it
+(`lumen_pulse.replay`, only after consent), so a session is recorded the same
+way across page loads. When the session rotates (see [Sessions](#sessions)) the
+recording stops, what is pending is uploaded under the old session, and a new
+recording starts for the new one: new decision, new full snapshot, `seq` from 0.
+
+- **Sampled sessions** stream: a chunk goes out every 10 s, when it reaches
+  `maxChunkBytes`, and when the page is hidden or closed.
+- **Other sessions** keep the last `bufferSeconds` in memory only (with a full
+  page snapshot at the start, so the buffer plays on its own). Nothing is
+  uploaded unless an `$exception` is captured (uncaught with `captureErrors`, or
+  `captureException()`). Then, with probability `onErrorSampleRate` (rolled
+  once per page), the buffer is uploaded and the session streams from then on.
+  Every `$exception` carries the `session_id`, so the error group links to the
+  replay.
+
+**Upload.** Chunks are gzip-compressed with the browser's `CompressionStream`,
+base64-encoded and sent to `POST {ingestUrl}/api/product/replay/chunk` with
+the same `lump_` key, in order (`seq` per session). The next `seq` is read from
+and written back to storage right before each upload, so tabs sharing a session
+take turns. Two tabs uploading in the same instant can still pick the same
+`seq` (storage has no atomic increment), and one of the two chunks can then be
+lost in playback. Browsers without
+`CompressionStream` (older than Chrome 80, Firefox 113, Safari 16.4) skip replay
+entirely; analytics and errors still work. Delivery follows the same retry
+rule as events. On `403` (for example `REPLAY_NOT_ENABLED`), `401`,
+`REPLAY_QUOTA_EXCEEDED` or `REPLAY_UNMASKED_FORBIDDEN`, recording stops for the
+rest of the session and `onError` gets the `LumenPulseError`. The last
+chunk on page close is best effort: compression is asynchronous, so up to 10 s
+can be lost when a tab is killed.
+
+**Retention and pricing.** Recordings are kept **30 days** by default (plans
+can extend it), then deleted. Replay is billed by GB stored: each plan includes
+an allowance (Free 1 GB, Pro 10 GB, Enterprise 100 GB per month), and storage
+above it is charged per GB. When the organization's replay storage cap is
+reached, uploads get `REPLAY_QUOTA_EXCEEDED` and the SDK stops recording.
+
 ## Delivery
 
 - Requests go to `POST {ingestUrl}/api/product/ingest/batch` with
@@ -267,6 +386,10 @@ createLumenPulse({
 | `PULSE_PII_PROPERTY_FORBIDDEN` | 400 | A property name looks like personal data | Drop, `onError` |
 | `PULSE_RATE_LIMITED` | 429 | Org-wide events/min exceeded | Retry once after `Retry-After`, then drop |
 | `PULSE_QUOTA_EXCEEDED` | 429 | Monthly quota spent | Drop, `onError` |
+| `REPLAY_NOT_ENABLED` | 403 | Replay is off for the organization | Stop replay, `onError` |
+| `REPLAY_QUOTA_EXCEEDED` | 429 | Monthly replay storage spent | Stop replay, `onError` |
+| `REPLAY_UNMASKED_FORBIDDEN` | 400 | `mask_level: none` without the plan allowing it | Stop replay, `onError` |
+| `REPLAY_CHUNK_TOO_LARGE` | 413 | One chunk over 512 KB gzip (also raised locally for a single huge event) | Drop chunk, `onError` |
 
 ## Content Security Policy
 

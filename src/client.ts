@@ -13,10 +13,19 @@ import {
   type EmitRequest,
   type NormalizedError,
 } from './errors.js'
+import { createReplayRecorder, resolveReplayOptions, type ReplayRecorder } from './replay.js'
+import {
+  ACTIVITY_WRITE_THROTTLE_MS,
+  SESSION_LAST_KEY,
+  clearSession,
+  isExpired,
+  readSession,
+  resolveSessionClock,
+  writeSession,
+} from './session.js'
 import {
   ANON_KEY,
   CONSENT_KEY,
-  SESSION_KEY,
   resolveStorage,
   uuid,
   type StorageLike,
@@ -55,9 +64,23 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
 
   let consent: ConsentStatus = loadConsent(storage, config.consent)
   let anonymousId: string | null = consent === 'granted' ? loadOrCreate(storage, ANON_KEY) : null
-  // session_id only touches storage once consent is granted; until then it
-  // lives in memory and is persisted on grant (cleared on deny).
-  let sessionId = consent === 'granted' ? loadOrCreate(storage, SESSION_KEY) : uuid()
+  // session_id and its start / last-activity times only touch storage once
+  // consent is granted; until then they live in memory and are persisted on
+  // grant (cleared on deny). A session ends after `sessionTimeoutMinutes`
+  // without activity or `sessionMaxHours` after it started.
+  const clock = resolveSessionClock(config.sessionTimeoutMinutes, config.sessionMaxHours)
+  const bootAt = Date.now()
+  const restored = consent === 'granted' ? readSession(storage) : null
+  const resume = restored !== null && !isExpired(bootAt, restored, clock)
+  let sessionId = resume ? restored.id : uuid()
+  let sessionStart = resume ? restored.start : bootAt
+  let lastActivity = resume ? restored.last : bootAt
+  let lastActivityWrite = 0
+  let rotationQueued = false
+  if (consent === 'granted' && !resume) {
+    writeSession(storage, { id: sessionId, start: sessionStart, last: lastActivity })
+    lastActivityWrite = bootAt
+  }
   let userId: string | null = null
   let orgId: string | null = null
   let queue: PulseEvent[] = []
@@ -67,6 +90,100 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
   const cleanups: Array<() => void> = []
   const errorOptions = resolveErrorOptions(config.captureErrors, config.appVersion)
   const deduper = new ErrorDeduper(errorOptions.maxPerMinute)
+  const transport = {
+    ingestUrl: config.ingestUrl,
+    writeKey: config.writeKey,
+    fetchImpl,
+    ...(config.onError ? { onError: config.onError } : {}),
+  }
+  const replayOptions = resolveReplayOptions(config.replay)
+  const replay: ReplayRecorder | null = replayOptions
+    ? createReplayRecorder(replayOptions, {
+        project: config.project,
+        storage,
+        transport,
+        includeQueryParams: config.includeQueryParams,
+        identity: () => ({ sessionId, userId, anonymousId }),
+        activity: () => replayActivity(),
+      })
+    : null
+
+  const persistSession = (now: number) => {
+    if (consent !== 'granted') return
+    writeSession(storage, { id: sessionId, start: sessionStart, last: lastActivity })
+    lastActivityWrite = now
+  }
+
+  /**
+   * Move to another session: a new one (`adopt` null) or one another tab
+   * already started. Everything per session starts over: error dedup, the
+   * replay sampling decision, seq and stop flags, and the recording itself.
+   */
+  const switchSession = (now: number, adopt: { id: string; start: number; last: number } | null) => {
+    // The pending replay chunk still belongs to the old session.
+    replay?.endSession()
+    deduper.clear()
+    if (adopt) {
+      sessionId = adopt.id
+      sessionStart = adopt.start
+      lastActivity = adopt.last
+    } else {
+      sessionId = uuid()
+      sessionStart = now
+      lastActivity = now
+      persistSession(now)
+    }
+    if (consent === 'granted' && !closed) replay?.start()
+  }
+
+  /** Rotate when the session expired; follow a session another tab started. */
+  const checkSession = (now: number) => {
+    if (consent === 'granted') {
+      const stored = readSession(storage)
+      if (stored && stored.id !== sessionId && !isExpired(now, stored, clock)) {
+        switchSession(now, stored)
+        return
+      }
+      // Another tab may have been active in this session.
+      if (stored && stored.id === sessionId) lastActivity = Math.max(lastActivity, stored.last)
+    }
+    if (isExpired(now, { start: sessionStart, last: lastActivity }, clock)) switchSession(now, null)
+  }
+
+  const touch = (now: number) => {
+    lastActivity = now
+    if (consent === 'granted' && now - lastActivityWrite >= ACTIVITY_WRITE_THROTTLE_MS) {
+      storage.setItem(SESSION_LAST_KEY, String(now))
+      lastActivityWrite = now
+    }
+  }
+
+  /** Activity: a tracked event, an error, or the page becoming visible. */
+  const activity = () => {
+    if (closed) return
+    const now = Date.now()
+    checkSession(now)
+    touch(now)
+  }
+
+  /**
+   * User input seen by the recorder. It runs inside rrweb's emit, so an
+   * expired session is rotated on the next tick rather than mid-emit.
+   */
+  const replayActivity = () => {
+    if (closed) return
+    const now = Date.now()
+    if (!isExpired(now, { start: sessionStart, last: lastActivity }, clock)) {
+      touch(now)
+      return
+    }
+    if (rotationQueued) return
+    rotationQueued = true
+    setTimeout(() => {
+      rotationQueued = false
+      activity()
+    }, 0)
+  }
 
   const schedule = () => {
     if (timer || closed) return
@@ -146,8 +263,10 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     extra?: TrackProperties,
   ) => {
     if (closed || consent !== 'granted') return
+    activity()
     if (isIgnored(error, errorOptions.ignore)) return
     if (errorOptions.sampleRate < 1 && Math.random() >= errorOptions.sampleRate) return
+    replay?.errorCaptured()
     const properties = exceptionProperties(error, handled, mechanism, errorOptions, extra)
     const path = typeof location !== 'undefined' ? currentPath(config.includeQueryParams) : undefined
     const emit = deduper.record(fingerprintOf(error), properties, path)
@@ -170,26 +289,24 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     }
     if (queue.length === 0) return
     const batch = queue.splice(0, queue.length)
-    const transport = {
-      ingestUrl: config.ingestUrl,
-      writeKey: config.writeKey,
-      fetchImpl,
-      ...(config.onError ? { onError: config.onError } : {}),
-    }
     // All chunks start synchronously so an unload flush gets every request
     // out before the page is torn down.
     await Promise.all(chunkEvents(batch, maxBatchSize).map((chunk) => sendBatch(chunk, transport)))
   }
 
-  const flush = (): Promise<void> => flushQueue(true)
+  const flush = async (): Promise<void> => {
+    await Promise.all([flushQueue(true), replay?.flush()])
+  }
 
   const client: LumenPulseClient = {
     track(eventName, properties = {}, context) {
+      activity()
       enqueue(buildEvent(eventName, properties, context ?? {}))
     },
 
     identify(nextUserId, traits = {}) {
       if (!nextUserId) return
+      activity()
       const previousAnon = anonymousId
       userId = nextUserId
       if (typeof traits.org_id === 'string') orgId = traits.org_id
@@ -213,19 +330,25 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
     },
 
     reset() {
+      // The pending replay chunk still belongs to the old session and user.
+      replay?.endSession()
       userId = null
       orgId = null
+      const now = Date.now()
       sessionId = uuid()
+      sessionStart = now
+      lastActivity = now
       deduper.clear() // dedup is per session
       if (consent === 'granted') {
-        storage.setItem(SESSION_KEY, sessionId)
+        persistSession(now)
         anonymousId = uuid()
         storage.setItem(ANON_KEY, anonymousId)
       } else {
         anonymousId = null
-        storage.removeItem(SESSION_KEY)
+        clearSession(storage)
         storage.removeItem(ANON_KEY)
       }
+      if (consent === 'granted') replay?.start() // new session, new sampling decision
     },
 
     setConsent(status) {
@@ -233,13 +356,17 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
       storage.setItem(CONSENT_KEY, status)
       if (status === 'granted') {
         anonymousId = loadOrCreate(storage, ANON_KEY)
-        storage.setItem(SESSION_KEY, sessionId)
+        persistSession(Date.now())
+        if (!closed) replay?.start()
       } else if (status === 'denied') {
         anonymousId = null
         storage.removeItem(ANON_KEY)
-        storage.removeItem(SESSION_KEY)
+        clearSession(storage)
         queue = []
         deduper.clear()
+        replay?.stop(true)
+      } else {
+        replay?.stop(false)
       }
     },
 
@@ -264,12 +391,13 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         errorTimer = null
       }
       while (cleanups.length) cleanups.pop()?.()
-      await flush()
+      await Promise.all([flushQueue(true), replay?.shutdown()])
     },
   }
 
   if (typeof window !== 'undefined') {
     cleanups.push(listenForUnload(() => void flush()))
+    cleanups.push(listenForVisible(activity))
 
     if (config.captureErrors) {
       cleanups.push(
@@ -282,6 +410,9 @@ export function createLumenPulse(config: LumenPulseConfig): LumenPulseClient {
         ),
       )
     }
+
+    // Loads rrweb only now, and only when replay is on and consent granted.
+    if (consent === 'granted') replay?.start()
 
     const pageViews = config.autocapture?.pageViews ?? (config.autocapturePageViews === true)
     if (pageViews === 'history') {
@@ -319,6 +450,15 @@ function listenForUnload(onHide: () => void): () => void {
     window.removeEventListener('pagehide', onPageHide)
     document.removeEventListener('visibilitychange', onVisibility)
   }
+}
+
+/** Coming back to the tab counts as activity (and rotates an expired session). */
+function listenForVisible(onVisible: () => void): () => void {
+  const onVisibility = () => {
+    if (document.visibilityState === 'visible') onVisible()
+  }
+  document.addEventListener('visibilitychange', onVisibility)
+  return () => document.removeEventListener('visibilitychange', onVisibility)
 }
 
 /**

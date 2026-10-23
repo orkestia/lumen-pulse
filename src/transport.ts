@@ -37,13 +37,13 @@ export class LumenPulseError extends Error {
   }
 }
 
-function joinUrl(base: string, path: string): string {
+export function joinUrl(base: string, path: string): string {
   const b = base.replace(/\/+$/, '')
   const p = path.startsWith('/') ? path : `/${path}`
   return `${b}${p}`
 }
 
-function byteLength(s: string): number {
+export function byteLength(s: string): number {
   return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : s.length * 3
 }
 
@@ -88,7 +88,7 @@ export function parseRetryAfter(value: string | null, now: number = Date.now()):
 
 function isRetryable(status: number, code: string | undefined): boolean {
   // A spent monthly quota is a 429 too, but retrying cannot help.
-  if (code === 'PULSE_QUOTA_EXCEEDED') return false
+  if (code === 'PULSE_QUOTA_EXCEEDED' || code === 'REPLAY_QUOTA_EXCEEDED') return false
   return status === 429 || status >= 500
 }
 
@@ -115,6 +115,7 @@ async function attempt(
   keepalive: boolean,
   count: number,
   config: TransportConfig,
+  label: string,
 ): Promise<Attempt> {
   let res: Response
   try {
@@ -136,7 +137,7 @@ async function attempt(
       ok: false,
       retryable: true,
       retryAfterMs: null,
-      error: new LumenPulseError(`lumen-pulse ingest failed: ${message}`, 0, undefined, count),
+      error: new LumenPulseError(`lumen-pulse ${label} failed: ${message}`, 0, undefined, count),
     }
   }
   if (res.ok) return { ok: true }
@@ -146,7 +147,7 @@ async function attempt(
     retryable: isRetryable(res.status, code),
     retryAfterMs: parseRetryAfter(res.headers.get('retry-after')),
     error: new LumenPulseError(
-      `lumen-pulse ingest failed: HTTP ${res.status}${code ? ` ${code}` : ''}`,
+      `lumen-pulse ${label} failed: HTTP ${res.status}${code ? ` ${code}` : ''}`,
       res.status,
       code,
       count,
@@ -155,40 +156,55 @@ async function attempt(
 }
 
 /**
- * POST one chunk of events. Network errors, 5xx and 429 are retried once
- * (after `Retry-After` when present, else a jittered backoff); other 4xx and
- * `PULSE_QUOTA_EXCEEDED` are never retried. On final failure the chunk is dropped and `onError` is called.
+ * POST a JSON body to `path` under `ingestUrl`. Network errors, 5xx and 429
+ * are retried once (after `Retry-After` when present, else a jittered
+ * backoff); other 4xx and spent quotas are never retried. `keepalive` is used
+ * when the body fits the browser's keepalive budget. Resolves with the final
+ * error, or null on success. Never rejects.
  */
-export async function sendBatch(
-  events: PulseEvent[],
+export async function postWithRetry(
+  path: string,
+  body: string,
+  count: number,
   config: TransportConfig,
-): Promise<void> {
-  if (events.length === 0) return
-  const url = joinUrl(config.ingestUrl, '/api/product/ingest/batch')
-  const body = JSON.stringify({ events })
+  label = 'ingest',
+): Promise<LumenPulseError | null> {
+  const url = joinUrl(config.ingestUrl, path)
   // keepalive lets the request outlive the page (unload flush), but only
   // for bodies under the browser's 64 KiB keepalive budget.
   const keepalive = byteLength(body) <= MAX_BODY_BYTES
 
-  const first = await attempt(url, body, keepalive, events.length, config)
-  if (first.ok) return
-  if (!first.retryable) {
-    config.onError?.(first.error)
-    return
-  }
+  const first = await attempt(url, body, keepalive, count, config, label)
+  if (first.ok) return null
+  if (!first.retryable) return first.error
 
   let delay: number
   if (first.retryAfterMs !== null) {
-    if (first.retryAfterMs > MAX_RETRY_AFTER_MS) {
-      config.onError?.(first.error)
-      return
-    }
+    if (first.retryAfterMs > MAX_RETRY_AFTER_MS) return first.error
     delay = first.retryAfterMs
   } else {
     delay = BASE_RETRY_MS + Math.random() * RETRY_JITTER_MS
   }
   await sleep(delay)
 
-  const second = await attempt(url, body, keepalive, events.length, config)
-  if (!second.ok) config.onError?.(second.error)
+  const second = await attempt(url, body, keepalive, count, config, label)
+  return second.ok ? null : second.error
+}
+
+/**
+ * POST one chunk of events (see `postWithRetry` for the retry rule). On final
+ * failure the chunk is dropped and `onError` is called.
+ */
+export async function sendBatch(
+  events: PulseEvent[],
+  config: TransportConfig,
+): Promise<void> {
+  if (events.length === 0) return
+  const error = await postWithRetry(
+    '/api/product/ingest/batch',
+    JSON.stringify({ events }),
+    events.length,
+    config,
+  )
+  if (error) config.onError?.(error)
 }
